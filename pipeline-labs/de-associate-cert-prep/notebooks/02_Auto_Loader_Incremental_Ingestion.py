@@ -121,9 +121,11 @@ display(dbutils.fs.ls(CUSTOMERS_LANDING_PATH))
 # TODO: Create Auto Loader stream for JSON customers
 
 customers_stream = spark.readStream \
-
-
-
+    .format("cloudFiles") \
+    .option("cloudFiles.format", "json") \
+    .option("cloudFiles.schemaLocation", CUSTOMERS_CHECKPOINT_PATH) \
+    .option("cloudFiles.inferColumnTypes", "true") \
+    .load(CUSTOMERS_LANDING_PATH)
 
 # Print schema to verify
 customers_stream.printSchema()
@@ -178,10 +180,11 @@ customers_stream.printSchema()
 # TODO: Write streaming data to bronze table
 
 customers_query = customers_stream.writeStream \
-
-
-
-
+    .format("delta") \
+    .outputMode("append") \
+    .option("checkpointLocation", CUSTOMERS_CHECKPOINT_PATH) \
+    .trigger(availableNow=True) \
+    .table(CUSTOMERS_BRONZE_TABLE)
 
 # Wait for stream to complete
 customers_query.awaitTermination()
@@ -300,10 +303,13 @@ display(dbutils.fs.ls(PRODUCTS_LANDING_PATH))
 # TODO: Create Auto Loader stream for CSV products
 
 products_stream = spark.readStream \
-
-
-
-
+    .format("cloudFiles") \
+    .option("cloudFiles.format", "csv") \
+    .option("cloudFiles.schemaLocation", PRODUCTS_CHECKPOINT_PATH) \
+    .option("cloudFiles.inferColumnTypes", "true") \
+    .option("cloudFiles.schemaEvolutionMode", "addNewColumns") \
+    .option("header", "true") \
+    .load(PRODUCTS_LANDING_PATH)
 
 products_stream.printSchema()
 
@@ -399,10 +405,11 @@ display(dbutils.fs.ls(SALES_LANDING_PATH))
 # TODO: Create Auto Loader stream for sales JSON data
 
 sales_stream = spark.readStream \
-
-
-
-
+    .format("cloudFiles") \
+    .option("cloudFiles.format", "json") \
+    .option("cloudFiles.schemaLocation", SALES_CHECKPOINT_PATH) \
+    .option("cloudFiles.inferColumnTypes", "true") \
+    .load(SALES_LANDING_PATH)
 
 sales_stream.printSchema()
 
@@ -497,15 +504,15 @@ display(spark.table(SALES_BRONZE_TABLE).limit(10))
 spark.sql(f"""
     CREATE TABLE IF NOT EXISTS {EVENTS_BRONZE_TABLE}
     (
-        
-        
-        
-        
-        
-        
-        
-        
-        
+        event_id STRING,
+        customer_id STRING,
+        event_type STRING,
+        product_id STRING,
+        event_timestamp STRING,
+        device_type STRING,
+        browser STRING,
+        session_id STRING,
+        page_url STRING
     )
     USING DELTA
 """)
@@ -562,10 +569,10 @@ print(f"Created table: {EVENTS_BRONZE_TABLE}")
 # TODO: Use COPY INTO to load events data
 
 spark.sql(f"""
-
-
-
-
+    COPY INTO {EVENTS_BRONZE_TABLE}
+    FROM '{EVENTS_LANDING_PATH}'
+    FILEFORMAT = JSON
+    COPY_OPTIONS ('mergeSchema' = 'true')
 """)
 
 print("COPY INTO completed")
