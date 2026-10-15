@@ -144,13 +144,13 @@ if duplicate_count > 0:
 # TODO: Deduplicate customers using window function
 
 # Create window spec
-window_spec = Window.partitionBy(     ).orderBy(
+window_spec = Window.partitionBy("customer_id").orderBy(F.col("customer_id").desc())
 
 # Apply row_number and filter
 customers_deduped = customers_bronze \
-
-
-
+    .withColumn("row_num", F.row_number().over(window_spec)) \
+    .filter(F.col("row_num") == 1) \
+    .drop("row_num")
 
 print(f"After deduplication: {customers_deduped.count():,}")
 
@@ -205,36 +205,38 @@ print(f"After deduplication: {customers_deduped.count():,}")
 customers_clean = customers_deduped.select(
     F.col("customer_id"),
     # TODO: Apply initcap and trim to first_name
-    
+    F.trim(F.initcap(F.col("first_name"))).alias("first_name"),
     # TODO: Apply initcap and trim to last_name
-    
+    F.trim(F.initcap(F.col("first_name"))).alias("last_name"),
     # TODO: Lowercase and trim email
-    
+    F.trim(F.lower(F.col("email"))).alias("email"),
     # TODO: Remove non-digits from phone
-    
+    F.regexp_replace(F.col("phone"), "[^0-9]", "").alias("phone"),
     F.col("location"),
     F.col("loyalty_tier"),
     F.col("registration_date").alias("account_created_date"),
     # TODO: Add processed_at timestamp
-    
+    F.current_timestamp().alias("processed_at")
 )
 
 # TODO: Add validation flags
 customers_clean = customers_clean.withColumn(
     "is_valid_email",
     # TODO: Add email regex validation
-    
+    F.col("email").rlike(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$")
 ).withColumn(
     "is_valid_phone",
     # TODO: Check phone length == 10
-    
+    F.length(F.col("phone")) == 10
 ).withColumn(
     "data_quality_score",
     # TODO: Sum up quality indicators (email not null + phone not null + valid email + valid phone)
-    
-    
-    
-    
+    (
+        F.when(F.col("email").isNotNull(), 1).otherwise(0) +
+        F.when(F.col("phone").isNotNull(), 1).otherwise(0) +
+        F.when(F.col("is_valid_email"), 1).otherwise(0) +
+        F.when(F.col("is_valid_phone"), 1).otherwise(0)
+    )
 )
 
 display(customers_clean.limit(10))
@@ -367,12 +369,12 @@ products_bronze.select(
 
 # TODO: Deduplicate products
 
-window_spec = Window.partitionBy(
+window_spec = Window.partitionBy("product_id").orderBy(F.col("product_id").desc())
 
 products_deduped = products_bronze \
-
-
-
+    .withColumn("row_num", F.row_number().over(window_spec)) \
+    .filter(F.col("row_num") == 1) \
+    .drop("row_num")
 
 print(f"After deduplication: {products_deduped.count():,}")
 
@@ -402,33 +404,35 @@ print(f"After deduplication: {products_deduped.count():,}")
 products_clean = products_deduped.select(
     F.col("product_id"),
     # TODO: Trim product_name
-    
+    F.trim(F.col("product_name")).alias("product_name"),
     # TODO: Trim category
-    
+    F.trim(F.col("category")).alias("category"),
     # TODO: Trim subcategory
-    
+    F.trim(F.col("subcategory")).alias("subcategory"),
     # TODO: Cast price to decimal(10,2)
-    
+    F.col("price").cast("decimal(10,2)").alias("price"),
     # TODO: Cast cost to decimal(10,2)
-        
+    F.col("cost").cast("decimal(10,2)").alias("cost"),
     # TODO: Add processed_at
-    
+    F.current_timestamp().alias("processed_at")
 )
 
 # TODO: Add validation flags
 products_clean = products_clean.withColumn(
     "is_valid_price",
     # TODO: price > 0 AND price < 100000
-    
+    (F.col("price") > 0) & (F.col("price") < 100000)
 ).withColumn(
     "is_valid_cost",
     # TODO: cost > 0 AND cost <= price
-    
+    (F.col("cost") > 0) & (F.col("cost") <= F.col("price"))
 ).withColumn(
     "profit_margin",
     # TODO: Calculate (price - cost) / price * 100, handle nulls
-    
-    
+    F.when(
+        (F.col("price") > 0) & (F.col("cost").isNotNull()),
+        ((F.col("price") - F.col("cost")) / F.col("price") * 100)
+    ).otherwise(None)   
 )
 
 display(products_clean.limit(10))
@@ -566,24 +570,26 @@ products_dim = spark.table(PRODUCTS_SILVER_TABLE)
 # TODO: Join sales with dimensions and transform
 
 # Join with customers
-sales_enriched = sales_bronze_stream \
+sales_enriched = orders_flat \
     .join(
         # TODO: Select customer fields and join
-        
-        
+        customers_dim.select("customer_id", "first_name", "last_name", "loyalty_tier"),
+        "customer_id",
+        "left"
     ) \
     .join(
         # TODO: Select product fields and join
-        
-        
+        products_dim.select("product_id", "product_name", "category", "subcategory", "price"),
+        "product_id",
+        "left"
     )
 
 # TODO: Select and transform fields
 sales_clean = sales_enriched.select(
-    F.col("sale_id"),
+    F.col("order_id"),
     F.col("customer_id"),
     # TODO: Concatenate customer name
-    
+    F.concat(F.col("first_name"), F.lit(" "), F.col("last_name")).alias("customer_name"),
     F.col("product_id"),
     F.col("product_name"),
     F.col("category"),
@@ -591,7 +597,7 @@ sales_clean = sales_enriched.select(
     F.col("quantity"),
     F.col("unit_price"),
     # TODO: Calculate subtotal
-    
+    (F.col("quantity") * F.col("unit_price")).alias("total_amount"),
     F.col("payment_method"),
     F.col("order_timestamp"),
     F.col("loyalty_tier"),
@@ -602,9 +608,10 @@ sales_clean = sales_enriched.select(
 sales_clean = sales_clean.withColumn(
     "is_valid_sale",
     # TODO: Check required fields
-    
-    
-    
+    (F.col("customer_id").isNotNull()) &
+    (F.col("product_id").isNotNull()) &
+    (F.col("quantity") > 0) &
+    (F.col("total_amount") > 0)
 )
 
 # COMMAND ----------
@@ -824,12 +831,15 @@ updates_prepared = updates.select(
 # TODO: Step 1 - Close existing records that changed
 target_table.alias("target").merge(
     # TODO: Fill in merge logic
-    
-    
+    updates_prepared.alias("updates"),
+    "target.customer_id = updates.customer_id AND target.is_current = true"
 ).whenMatchedUpdate(
     # TODO: Fill in update condition and set
-    
-    
+    condition="target.loyalty_tier != updates.loyalty_tier",
+    set={
+        "effective_end_date": F.current_date(),
+        "is_current": "false"
+    }
 ).execute()
 
 print("Closed changed records")
